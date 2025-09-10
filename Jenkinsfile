@@ -1,15 +1,14 @@
 pipeline {
   agent any
-  options { ansiColor('xterm') }
   stages {
     stage('Checkout') {
-      steps { git branch: 'main', url: 'https://github.com/<your-username>/8.2CDevSecOps.git' }
+      steps { git branch: 'main', url: 'https://github.com/akashjaura16/8.2CDevSecOps.git' }
     }
     stage('Install Dependencies') {
       steps { sh 'npm install' }
     }
     stage('Run Tests') {
-      steps { sh 'npm test || true' }    // keep going even if tests fail for demo
+      steps { sh 'npm test || true' }
     }
     stage('Generate Coverage Report') {
       steps { sh 'npm run coverage || true' }
