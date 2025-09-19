@@ -1,120 +1,94 @@
 pipeline {
   agent any
   options { timestamps() }
-  triggers { pollSCM('H/2 * * * *') } // auto-trigger on new commits (poll every ~2 min)
-
-  environment {
-    // --- SonarCloud config ---
-    SONAR_ORG        = 'akashjaura16'                   // <--- your SonarCloud org
-    SONAR_PROJECT_KEY= 'akashjaura16_8.2CDevSecOps'     // <--- your project key
-    SONAR_HOST_URL   = 'https://sonarcloud.io'
-
-    // --- Email (optional; works if Email Extension is configured in Jenkins) ---
-    NOTIFY_EMAIL     = '' // e.g. 'your.name@gmail.com'. Leave empty to disable.
-  }
+  triggers { pollSCM('H/5 * * * *') } // auto-run after commits
 
   stages {
     stage('Checkout') {
       steps {
-        git branch: 'main', url: 'https://github.com/akashjaura16/8.2CDevSecOps.git'
+        git branch: 'main', url: 'https://github.com/<your_github_username>/8.2CDevSecOps.git'
       }
     }
 
     stage('Install Dependencies') {
-      steps { sh 'npm install' }
+      steps {
+        // prefer clean, falls back to install
+        sh 'npm ci || npm install'
+        sh 'node -v && npm -v'
+      }
     }
 
     stage('Run Tests') {
       steps {
-        // nodejs-goof uses "snyk test"; allow pipeline to continue if it fails/auth needed
         sh 'npm test || true'
+      }
+      post {
+        always {
+          // if you configured mocha-junit-reporter, this will pick them up
+          junit allowEmptyResults: true, testResults: 'reports/**/*.xml'
+        }
       }
     }
 
     stage('Generate Coverage Report') {
       steps {
-        sh '''
-          # If a coverage script exists, try it; otherwise create a dummy lcov to keep Sonar happy
-          if npm run | grep -q "^  coverage"; then
-            npm run coverage || true
-          fi
-          [ -f coverage/lcov.info ] || { mkdir -p coverage && echo "TN:\\nend_of_record" > coverage/lcov.info; }
-        '''
+        sh 'npm run coverage || true'   // should create coverage/lcov.info
+      }
+      post {
+        always { archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true }
       }
     }
 
     stage('NPM Audit (Security Scan)') {
-      steps { sh 'npm audit || true' }
+      steps {
+        sh 'npm audit --audit-level=low || true'
+        sh 'npm audit --json > npm-audit.json || true'
+      }
+      post {
+        always { archiveArtifacts artifacts: 'npm-audit.json', allowEmptyArchive: true }
+      }
     }
 
     stage('SonarCloud Analysis') {
       environment {
-        PATH = "${WORKSPACE}/.scanner/sonar-scanner/bin:${PATH}"
+        SC_VERSION = '5.0.1.3006' // sonar-scanner-cli version
       }
       steps {
         withCredentials([string(credentialsId: 'SONAR_TOKEN', variable: 'SONAR_TOKEN')]) {
           sh '''
             set -e
-            SCAN_DIR="$WORKSPACE/.scanner"
-            mkdir -p "$SCAN_DIR"
-            cd "$SCAN_DIR"
+            TOOLS_DIR="$WORKSPACE/.tools"
+            mkdir -p "$TOOLS_DIR"
+            SC_DIR="$TOOLS_DIR/sonar-scanner-$SC_VERSION"
 
-            # Ensure unzip & curl exist (handle both with/without sudo in the container)
-            if ! command -v unzip >/dev/null || ! command -v curl >/dev/null; then
-              (sudo apt-get update && sudo apt-get install -y unzip curl) || (apt-get update && apt-get install -y unzip curl)
+            if [ ! -x "$SC_DIR/bin/sonar-scanner" ]; then
+              echo "Downloading sonar-scanner-cli ${SC_VERSION}..."
+              curl -fsSL -o "$TOOLS_DIR/scanner.zip" \
+                "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SC_VERSION}-linux.zip"
+              unzip -q "$TOOLS_DIR/scanner.zip" -d "$TOOLS_DIR"
+              mv "$TOOLS_DIR/sonar-scanner-${SC_VERSION}-linux" "$SC_DIR"
             fi
 
-            # Download SonarScanner CLI (correct URL includes "cli-")
-            if [ ! -d sonar-scanner ]; then
-              echo "Downloading SonarScanner CLI..."
-              curl -sSLo scanner.zip https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
-              unzip -o scanner.zip
-              mv sonar-scanner-* sonar-scanner
+            export PATH="$SC_DIR/bin:$PATH"
+
+            # Ensure coverage is present for Sonar
+            if [ ! -f coverage/lcov.info ]; then
+              echo "coverage/lcov.info missing; running coverage..."
+              npm run coverage || true
             fi
 
-            cd "$WORKSPACE"
-            sonar-scanner \
-              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-              -Dsonar.organization=${SONAR_ORG} \
-              -Dsonar.host.url=${SONAR_HOST_URL} \
-              -Dsonar.login=${SONAR_TOKEN} \
-              -Dsonar.sources=. \
-              -Dsonar.exclusions="node_modules/**,test/**" \
-              -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
-              -Dsonar.sourceEncoding=UTF-8
+            # Run analysis (token injected)
+            sonar-scanner -Dsonar.login="$SONAR_TOKEN"
           '''
         }
+      }
+      post {
+        always { archiveArtifacts artifacts: '**/.scannerwork/**/*.log', allowEmptyArchive: true }
       }
     }
   }
 
   post {
-    always {
-      archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
-    }
-    success {
-      script {
-        if (env.NOTIFY_EMAIL?.trim()) {
-          emailext(
-            to: env.NOTIFY_EMAIL,
-            subject: "Jenkins ✔ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-            body: "Build succeeded. See ${env.BUILD_URL}",
-            attachLog: true
-          )
-        }
-      }
-    }
-    failure {
-      script {
-        if (env.NOTIFY_EMAIL?.trim()) {
-          emailext(
-            to: env.NOTIFY_EMAIL,
-            subject: "Jenkins ❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-            body: "Build failed. See ${env.BUILD_URL}",
-            attachLog: true
-          )
-        }
-      }
-    }
+    always { script { currentBuild.description = "Build #${env.BUILD_NUMBER} on ${env.NODE_NAME}" } }
   }
 }
