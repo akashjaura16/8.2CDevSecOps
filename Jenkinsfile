@@ -1,7 +1,7 @@
 pipeline {
   agent any
   options { timestamps() }
-  triggers { pollSCM('H/5 * * * *') } // auto-run after commits
+  triggers { pollSCM('H/5 * * * *') }
 
   stages {
     stage('Checkout') {
@@ -12,7 +12,6 @@ pipeline {
 
     stage('Install Dependencies') {
       steps {
-        // prefer clean, falls back to install
         sh 'npm ci || npm install'
         sh 'node -v && npm -v'
       }
@@ -24,7 +23,6 @@ pipeline {
       }
       post {
         always {
-          // if you configured mocha-junit-reporter, this will pick them up
           junit allowEmptyResults: true, testResults: 'reports/**/*.xml'
         }
       }
@@ -32,7 +30,7 @@ pipeline {
 
     stage('Generate Coverage Report') {
       steps {
-        sh 'npm run coverage || true'   // should create coverage/lcov.info
+        sh 'npm run coverage || true'
       }
       post {
         always { archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true }
@@ -51,7 +49,7 @@ pipeline {
 
     stage('SonarCloud Analysis') {
       environment {
-        SC_VERSION = '5.0.1.3006' // sonar-scanner-cli version
+        SC_VERSION = '5.0.1.3006'
       }
       steps {
         withCredentials([string(credentialsId: 'SONAR_TOKEN', variable: 'SONAR_TOKEN')]) {
@@ -71,13 +69,12 @@ pipeline {
 
             export PATH="$SC_DIR/bin:$PATH"
 
-            # Ensure coverage is present for Sonar
+            # Ensure coverage file exists
             if [ ! -f coverage/lcov.info ]; then
-              echo "coverage/lcov.info missing; running coverage..."
+              echo "Generating coverage report..."
               npm run coverage || true
             fi
 
-            # Run analysis (token injected)
             sonar-scanner -Dsonar.login="$SONAR_TOKEN"
           '''
         }
@@ -86,9 +83,5 @@ pipeline {
         always { archiveArtifacts artifacts: '**/.scannerwork/**/*.log', allowEmptyArchive: true }
       }
     }
-  }
-
-  post {
-    always { script { currentBuild.description = "Build #${env.BUILD_NUMBER} on ${env.NODE_NAME}" } }
   }
 }
